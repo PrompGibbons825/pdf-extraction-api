@@ -1,0 +1,6 @@
+{
+  "name": "pdf-extraction-api",
+  "description": "PDF extraction with handwriting analysis for Supabase",
+  "buildCommand": "pip install -r requirements.txt",
+  "startCommand": "gunicorn app:app"
+}
