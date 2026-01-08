@@ -161,59 +161,74 @@ def detect_handwriting_fast(pdf_bytes: bytes, max_pages: int = None) -> dict:
     except Exception as e:
         print(f"Error detecting handwriting: {str(e)}")
         return {'has_handwriting': False, 'handwritten_sections': [], 'confidence': 0}
-        
-        print(f"EasyOCR extraction complete: {len(handwritten_sections)} pages with content")
-        return {
-            'has_handwriting': len(handwritten_sections) > 0,
-            'handwritten_sections': handwritten_sections,
-            'confidence': 0.85  # EasyOCR confidence
-        }
-    except Exception as e:
-        print(f"Error detecting handwriting: {str(e)}")
-        return {'has_handwriting': False, 'handwritten_sections': [], 'confidence': 0}
 
 def detect_handwriting_only(pdf_bytes: bytes) -> dict:
     """Quick handwriting detection WITHOUT full text extraction
     
     Only determines if handwriting exists, doesn't extract all text.
     This is MUCH faster for handwriting_only mode.
+    Memory-efficient: only converts the pages we need.
     """
     try:
         print("🔍 Quick handwriting detection (no text extraction)...")
         
-        images = pdf2image.convert_from_bytes(pdf_bytes, dpi=75)  # Lower DPI for speed
+        # First, get total page count without loading all pages
+        pdf_file = io.BytesIO(pdf_bytes)
+        reader = pypdf.PdfReader(pdf_file)
+        total_pages = len(reader.pages)
+        print(f"Total pages: {total_pages}")
         
-        # Sample first and last 5 pages for handwriting presence
-        pages_to_sample = min(10, len(images))
+        # Determine which pages to sample (first, last, and a few in middle)
+        pages_to_check = [0]  # Always first page
+        if total_pages > 1:
+            pages_to_check.append(total_pages - 1)  # Last page
+        # Add a few middle pages
+        if total_pages > 10:
+            pages_to_check.extend([total_pages // 4, total_pages // 2, (3 * total_pages) // 4])
+        
+        pages_to_check = sorted(set(pages_to_check))  # Remove duplicates and sort
+        print(f"Sampling pages: {pages_to_check}")
+        
         has_handwriting = False
         
-        for idx in [0, len(images)-1] + list(range(1, min(5, len(images)))):
-            if idx >= len(images):
+        # Convert only the pages we need (one at a time to save memory)
+        for page_num in pages_to_check:
+            if page_num >= total_pages:
                 continue
             try:
-                img = images[idx]
-                # Convert PIL Image to numpy array for EasyOCR
+                # Convert only this specific page
+                images = pdf2image.convert_from_bytes(
+                    pdf_bytes, 
+                    dpi=50,  # Very low DPI to save memory
+                    first_page=page_num + 1, 
+                    last_page=page_num + 1
+                )
+                
+                if not images:
+                    continue
+                
+                img = images[0]
                 img_array = np.array(img)
-                results = ocr_reader.readtext(img_array, detail=1)  # detail=1 gives confidence
+                results = ocr_reader.readtext(img_array, detail=1)
                 
                 # Check if any detected text has low confidence (likely handwriting)
-                # or has variable font sizes (characteristic of handwriting)
                 for result in results:
                     confidence = result[2]
                     if confidence < 0.4:  # Low confidence = likely handwriting
                         has_handwriting = True
+                        print(f"Handwriting detected on page {page_num + 1}")
                         break
                 
                 if has_handwriting:
                     break
                     
             except Exception as e:
-                print(f"Sample page {idx}: {str(e)}")
+                print(f"Sample page {page_num}: {str(e)}")
         
         print(f"✓ Handwriting detection complete: {has_handwriting}")
         return {
             'has_handwriting': has_handwriting,
-            'handwritten_sections': [],  # Empty - no extraction in quick mode
+            'handwritten_sections': [],
             'confidence': 0.7
         }
     except Exception as e:
