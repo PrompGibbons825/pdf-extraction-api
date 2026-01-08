@@ -377,13 +377,18 @@ def health_check():
 @app.route('/extract', methods=['POST'])
 def extract_pdf():
     """
-    Main extraction endpoint
+    Main extraction endpoint - TWO-LAYER ARCHITECTURE AWARE
     
     Expected JSON body:
     {
         "pdf_url": "https://...", OR
-        "pdf_base64": "base64 encoded PDF"
+        "pdf_base64": "base64 encoded PDF",
+        "mode": "full" | "handwriting_only" (optional, default: "full")
     }
+    
+    Modes:
+    - "full": Complete extraction (text + handwriting) [use only if frontend extraction unavailable]
+    - "handwriting_only": Only detect handwriting, assume frontend did text extraction [FAST MODE]
     
     Returns:
     {
@@ -397,6 +402,9 @@ def extract_pdf():
         
         if not data:
             return jsonify({'error': 'No JSON data provided'}), 400
+        
+        mode = data.get('mode', 'full')
+        print(f"📋 Extraction mode: {mode}")
         
         pdf_bytes = None
         
@@ -422,42 +430,78 @@ def extract_pdf():
         if not pdf_bytes:
             return jsonify({'error': 'No PDF data'}), 400
         
-        # Skip text extraction - go straight to EasyOCR for handwriting (faster)
-        print("Extracting handwriting with EasyOCR...")
-        handwriting = detect_handwriting_fast(pdf_bytes)
-        
-        # Create response with both text extraction + handwriting OCR
-        ai_context = {
-            'title': 'Extracted Document',
-            'document_type': 'PDF Document (Handwritten)',
-            'overview': f"Handwritten document with {len(handwriting.get('handwritten_sections', []))} pages extracted",
-            'key_concepts': [],
-            'sections': handwriting.get('handwritten_sections', [])[:20],  # First 20 pages
-            'definitions': [],
-            'learning_objectives': [],
-            'difficulty_level': 'Unknown',
-            'handwritten_content': handwriting.get('handwritten_sections', []),
-            'tables': [],
-            'diagrams': [],
-            'key_formulas': [],
-            'full_text': '\n\n---PAGE BREAK---\n\n'.join([
-                s.get('content', '') for s in handwriting.get('handwritten_sections', [])
-            ])
-        }
-        
-        return jsonify({
-            'success': True,
-            'ai_context': ai_context,
-            'metadata': {
-                'total_pages': len(handwriting.get('handwritten_sections', [])),
-                'has_handwriting': handwriting.get('has_handwriting', False),
-                'handwriting_pages': len(handwriting.get('handwritten_sections', [])),
-                'extraction_method': 'easyocr_full_document'
+        # Handle two-layer architecture
+        if mode == 'handwriting_only':
+            # LIGHTWEIGHT MODE: Only detect handwriting (assume frontend did text extraction)
+            print("🔴 Lightweight mode: Detecting handwriting only...")
+            handwriting = detect_handwriting_fast(pdf_bytes)
+            
+            ai_context = {
+                'title': 'Handwriting Analysis',
+                'document_type': 'PDF Document Analysis',
+                'overview': f"Handwriting detection complete: {handwriting.get('has_handwriting', False)}",
+                'key_concepts': [],
+                'sections': [],
+                'definitions': [],
+                'learning_objectives': [],
+                'difficulty_level': 'Unknown',
+                'handwritten_content': handwriting.get('handwritten_sections', []),
+                'tables': [],
+                'diagrams': [],
+                'key_formulas': []
             }
-        }), 200
+            
+            return jsonify({
+                'success': True,
+                'ai_context': ai_context,
+                'metadata': {
+                    'total_pages': len(handwriting.get('handwritten_sections', [])),
+                    'has_handwriting': handwriting.get('has_handwriting', False),
+                    'handwriting_pages': len(handwriting.get('handwritten_sections', [])),
+                    'extraction_method': 'railway_handwriting_only'
+                }
+            }), 200
+        
+        else:
+            # FULL MODE: Complete extraction (use only when frontend extraction unavailable)
+            print("🔵 Full mode: Complete text + handwriting extraction...")
+            
+            # Extract text structure
+            text_result = extract_text_structure(pdf_bytes)
+            
+            # Detect handwriting
+            handwriting = detect_handwriting_fast(pdf_bytes)
+            
+            # Create response with both text extraction + handwriting OCR
+            ai_context = {
+                'title': text_result.get('title', 'Extracted Document'),
+                'document_type': text_result.get('document_type', 'PDF Document'),
+                'overview': text_result.get('overview', ''),
+                'key_concepts': text_result.get('key_concepts', []),
+                'sections': text_result.get('sections', []),
+                'definitions': text_result.get('definitions', []),
+                'learning_objectives': text_result.get('learning_objectives', []),
+                'difficulty_level': text_result.get('difficulty_level', 'Unknown'),
+                'handwritten_content': handwriting.get('handwritten_sections', []),
+                'tables': text_result.get('tables', []),
+                'diagrams': text_result.get('diagrams', []),
+                'key_formulas': text_result.get('key_formulas', []),
+                'full_text': text_result.get('full_text', '')
+            }
+            
+            return jsonify({
+                'success': True,
+                'ai_context': ai_context,
+                'metadata': {
+                    'total_pages': text_result.get('total_pages', 0),
+                    'has_handwriting': handwriting.get('has_handwriting', False),
+                    'handwriting_pages': len(handwriting.get('handwritten_sections', [])),
+                    'extraction_method': 'railway_full_extraction'
+                }
+            }), 200
     
     except Exception as e:
-        print(f"Error: {str(e)}")
+        print(f"❌ Error: {str(e)}")
         return jsonify({'error': f'Server error: {str(e)}'}), 500
 
 if __name__ == '__main__':
