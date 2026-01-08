@@ -157,6 +157,53 @@ def detect_handwriting_fast(pdf_bytes: bytes, max_pages: int = None) -> dict:
         print(f"Error detecting handwriting: {str(e)}")
         return {'has_handwriting': False, 'handwritten_sections': [], 'confidence': 0}
 
+def detect_handwriting_only(pdf_bytes: bytes) -> dict:
+    """Quick handwriting detection WITHOUT full text extraction
+    
+    Only determines if handwriting exists, doesn't extract all text.
+    This is MUCH faster for handwriting_only mode.
+    """
+    try:
+        print("🔍 Quick handwriting detection (no text extraction)...")
+        reader = easyocr.Reader(['en'], gpu=False)
+        
+        images = pdf2image.convert_from_bytes(pdf_bytes, dpi=75)  # Lower DPI for speed
+        
+        # Sample first and last 5 pages for handwriting presence
+        pages_to_sample = min(10, len(images))
+        has_handwriting = False
+        
+        for idx in [0, len(images)-1] + list(range(1, min(5, len(images)))):
+            if idx >= len(images):
+                continue
+            try:
+                img = images[idx]
+                results = reader.readtext(img, detail=1)  # detail=1 gives confidence
+                
+                # Check if any detected text has low confidence (likely handwriting)
+                # or has variable font sizes (characteristic of handwriting)
+                for result in results:
+                    confidence = result[2]
+                    if confidence < 0.4:  # Low confidence = likely handwriting
+                        has_handwriting = True
+                        break
+                
+                if has_handwriting:
+                    break
+                    
+            except Exception as e:
+                print(f"Sample page {idx}: {str(e)}")
+        
+        print(f"✓ Handwriting detection complete: {has_handwriting}")
+        return {
+            'has_handwriting': has_handwriting,
+            'handwritten_sections': [],  # Empty - no extraction in quick mode
+            'confidence': 0.7
+        }
+    except Exception as e:
+        print(f"Error in quick handwriting detection: {str(e)}")
+        return {'has_handwriting': False, 'handwritten_sections': [], 'confidence': 0}
+
 def encode_image_to_base64(image_bytes: bytes) -> str:
     """Encode image bytes to base64"""
     return base64.standard_b64encode(image_bytes).decode('utf-8')
@@ -433,8 +480,9 @@ def extract_pdf():
         # Handle two-layer architecture
         if mode == 'handwriting_only':
             # LIGHTWEIGHT MODE: Only detect handwriting (assume frontend did text extraction)
-            print("🔴 Lightweight mode: Detecting handwriting only...")
-            handwriting = detect_handwriting_fast(pdf_bytes)
+            # DO NOT extract full text - use quick detection instead
+            print("🔴 Lightweight mode: Quick handwriting detection only (NO text extraction)...")
+            handwriting = detect_handwriting_only(pdf_bytes)  # Fast detection, no text extraction
             
             ai_context = {
                 'title': 'Handwriting Analysis',
