@@ -777,12 +777,31 @@ def process_ocr_background(pdf_bytes: bytes, material_id: str, total_pages: int)
         # Combine all OCR text
         full_ocr_text = '\n\n'.join(all_text)
         
+        # Generate AI analysis (title, summary, topics) from OCR content
+        ai_metadata = None
+        if full_ocr_text and len(full_ocr_text) > 100:
+            print(f"🤖 Generating AI analysis from OCR content...")
+            ai_metadata = generate_material_metadata(full_ocr_text, total_pages)
+        
+        # Prepare update data
+        update_data = {'content': full_ocr_text[:50000]} if full_ocr_text else {}
+        
+        # Add AI-generated metadata if available
+        if ai_metadata:
+            if ai_metadata.get('title'):
+                update_data['title'] = ai_metadata['title']
+            if ai_metadata.get('summary'):
+                update_data['summary'] = ai_metadata['summary']
+            if ai_metadata.get('topics') and len(ai_metadata['topics']) > 0:
+                update_data['topic'] = ai_metadata['topics'][0]  # Primary topic
+            print(f"✅ AI metadata generated: {ai_metadata.get('title', 'N/A')}")
+        
         # Update final progress and mark as completed
         update_material_progress(
             material_id, 
             100, 
             'completed',
-            {'content': full_ocr_text[:50000]} if full_ocr_text else None  # Limit to 50k chars
+            update_data if update_data else None
         )
         
         print(f"✅ Background OCR complete for {material_id}: {len(full_ocr_text)} chars extracted")
@@ -790,6 +809,70 @@ def process_ocr_background(pdf_bytes: bytes, material_id: str, total_pages: int)
     except Exception as e:
         print(f"❌ Background OCR failed for {material_id}: {str(e)}")
         update_material_progress(material_id, 0, 'ocr_failed')
+
+
+def generate_material_metadata(ocr_text: str, total_pages: int) -> dict:
+    """
+    Generate title, summary, and topics from OCR content using OpenAI
+    
+    Args:
+        ocr_text: The extracted OCR text from the document
+        total_pages: Total number of pages in the document
+    
+    Returns:
+        Dictionary with title, summary, and topics
+    """
+    try:
+        # Use first 8000 chars for analysis (enough context, stays under token limits)
+        text_sample = ocr_text[:8000]
+        
+        prompt = f"""Analyze this document content and generate metadata.
+
+Document text (from {total_pages} pages):
+{text_sample}
+
+Return ONLY valid JSON (no markdown, no code blocks):
+{{
+    "title": "A clear, descriptive title for this document (max 100 chars)",
+    "summary": "A 2-3 sentence summary of what this document covers",
+    "topics": ["topic1", "topic2", "topic3"],
+    "difficulty": "beginner|intermediate|advanced"
+}}"""
+        
+        response = get_openai_client().chat.completions.create(
+            model="gpt-4o-mini",  # Use mini for cost efficiency
+            max_tokens=500,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a document analyzer. Return only valid JSON, no markdown formatting."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+        )
+        
+        response_text = response.choices[0].message.content
+        
+        # Clean up response - remove markdown if present
+        if '```json' in response_text:
+            response_text = response_text.split('```json')[1].split('```')[0]
+        elif '```' in response_text:
+            response_text = response_text.split('```')[1].split('```')[0]
+        
+        metadata = json.loads(response_text.strip())
+        return {
+            'title': metadata.get('title', ''),
+            'summary': metadata.get('summary', ''),
+            'topics': metadata.get('topics', []),
+            'difficulty': metadata.get('difficulty', 'intermediate')
+        }
+        
+    except Exception as e:
+        print(f"⚠️ Error generating metadata: {str(e)}")
+        return None
 
 
 @app.route('/extract-async', methods=['POST'])
