@@ -134,7 +134,11 @@ def ocr_with_replicate(image_base64: str) -> str:
 
 def ocr_with_replicate_batch(images_base64: list) -> list:
     """
-    Process multiple images with Replicate OCR in parallel
+    Process multiple images with Replicate OCR sequentially with delays
+    
+    Respects Replicate's rate limits:
+    - 6 requests per minute when credit < $5
+    - Sequential processing with 500ms delays between requests
     
     Args:
         images_base64: List of base64 encoded image strings
@@ -144,26 +148,19 @@ def ocr_with_replicate_batch(images_base64: list) -> list:
     """
     results = []
     
-    # Process images in parallel using ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = {
-            executor.submit(ocr_with_replicate, img_b64): idx 
-            for idx, img_b64 in enumerate(images_base64)
-        }
-        
-        # Collect results maintaining order
-        result_map = {}
-        for future in as_completed(futures):
-            idx = futures[future]
-            try:
-                text = future.result()
-                result_map[idx] = text
-            except Exception as e:
-                print(f"⚠️ OCR failed for image {idx}: {str(e)}")
-                result_map[idx] = ""
-        
-        # Sort by index
-        results = [result_map.get(i, "") for i in range(len(images_base64))]
+    # Process images SEQUENTIALLY with delays to respect rate limits
+    for idx, img_b64 in enumerate(images_base64):
+        try:
+            text = ocr_with_replicate(img_b64)
+            results.append(text)
+            
+            # Add delay between requests (500ms) to respect rate limits
+            if idx < len(images_base64) - 1:
+                time.sleep(0.5)
+                
+        except Exception as e:
+            print(f"⚠️ OCR failed for image {idx}: {str(e)}")
+            results.append("")
     
     return results
 
@@ -793,8 +790,7 @@ def process_ocr_background(pdf_bytes: bytes, material_id: str, total_pages: int)
                 update_material_progress(
                     material_id, 
                     progress, 
-                    'ocr_failed',  # Special status to trigger frontend fallback
-                    {'ocr_error': f'OCR terminated after {MAX_CONSECUTIVE_FAILURES} consecutive failures'}
+                    'ocr_failed'  # Special status to trigger frontend fallback
                 )
                 return  # Exit early
         
@@ -813,7 +809,7 @@ def process_ocr_background(pdf_bytes: bytes, material_id: str, total_pages: int)
         
     except Exception as e:
         print(f"❌ Background OCR failed for {material_id}: {str(e)}")
-        update_material_progress(material_id, 0, 'ocr_failed', {'ocr_error': str(e)})
+        update_material_progress(material_id, 0, 'ocr_failed')
 
 
 @app.route('/extract-async', methods=['POST'])
