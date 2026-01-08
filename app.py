@@ -102,7 +102,7 @@ def get_easyocr_reader():
 def ocr_with_replicate(image_base64: str) -> str:
     """
     Run OCR on an image using Replicate's GPU-accelerated models
-    Uses abiruyt/text-extract-ocr for document text extraction
+    Uses lucataco/deepseek-ocr for high-accuracy document text extraction
     
     Args:
         image_base64: Base64 encoded image string
@@ -117,10 +117,9 @@ def ocr_with_replicate(image_base64: str) -> str:
         # Create data URI for the image
         image_uri = f"data:image/png;base64,{image_base64}"
         
-        # Run OCR model on Replicate
-        # Using abiruyt/text-extract-ocr - good for document OCR
+        # Run OCR model on Replicate - using lucataco/deepseek-ocr for high accuracy
         output = replicate.run(
-            "abiruyt/text-extract-ocr:a524caeaa23495bc9edc805ab08ab5fe943afd3f34571a2d9f33f4d3a3f8f3aa",
+            "lucataco/deepseek-ocr",
             input={"image": image_uri}
         )
         
