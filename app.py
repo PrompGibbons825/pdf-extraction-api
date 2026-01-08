@@ -576,7 +576,9 @@ def health_check():
         'service': 'pdf-extraction-api',
         'ocr_engine': 'replicate_gpu' if use_replicate else 'easyocr_cpu',
         'replicate_configured': bool(REPLICATE_API_TOKEN),
-        'replicate_enabled': USE_REPLICATE_OCR
+        'replicate_enabled': USE_REPLICATE_OCR,
+        'supabase_configured': bool(SUPABASE_URL and SUPABASE_SERVICE_KEY),
+        'supabase_url_set': bool(SUPABASE_URL)
     }), 200
 
 @app.route('/extract', methods=['POST'])
