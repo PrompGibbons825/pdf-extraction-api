@@ -578,12 +578,19 @@ def extract_pdf():
 
 
 def process_ocr_background(pdf_bytes: bytes, material_id: str, total_pages: int):
-    """Background task to process OCR on all pages and update progress"""
+    """Background task to process OCR on all pages and update progress
+    
+    Implements 3-consecutive-failure termination:
+    - If 3 chunks fail in a row, terminate processing
+    - Mark status as 'ocr_failed' to trigger frontend fallback
+    """
     try:
         print(f"🔄 Starting background OCR for material {material_id} ({total_pages} pages)")
         
         all_text = []
         chunk_size = 5  # Process 5 pages at a time
+        consecutive_failures = 0  # Track consecutive chunk failures
+        MAX_CONSECUTIVE_FAILURES = 3
         
         for chunk_start in range(0, total_pages, chunk_size):
             chunk_end = min(chunk_start + chunk_size, total_pages)
@@ -594,6 +601,7 @@ def process_ocr_background(pdf_bytes: bytes, material_id: str, total_pages: int)
             
             print(f"📄 Processing pages {chunk_start + 1}-{chunk_end} ({progress}%)...")
             
+            chunk_success = False
             try:
                 # Convert chunk to images
                 images = pdf2image.convert_from_bytes(
@@ -619,12 +627,32 @@ def process_ocr_background(pdf_bytes: bytes, material_id: str, total_pages: int)
                         page_text = ' '.join(results)
                         if page_text.strip():
                             all_text.append(f"[Page {page_num}]\n{page_text}")
+                            chunk_success = True  # At least one page had content
                             
                     except Exception as e:
                         print(f"⚠️ Error on page {page_num}: {str(e)}")
+                
+                # If we got here without exception and got some text, reset failure counter
+                if chunk_success:
+                    consecutive_failures = 0
+                else:
+                    consecutive_failures += 1
+                    print(f"⚠️ Chunk {chunk_start + 1}-{chunk_end} yielded no content (failures: {consecutive_failures}/{MAX_CONSECUTIVE_FAILURES})")
                         
             except Exception as e:
-                print(f"⚠️ Error processing chunk {chunk_start}-{chunk_end}: {str(e)}")
+                consecutive_failures += 1
+                print(f"⚠️ Error processing chunk {chunk_start}-{chunk_end}: {str(e)} (failures: {consecutive_failures}/{MAX_CONSECUTIVE_FAILURES})")
+            
+            # Check if we've hit 3 consecutive failures
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                print(f"❌ {MAX_CONSECUTIVE_FAILURES} consecutive chunk failures - terminating OCR")
+                update_material_progress(
+                    material_id, 
+                    progress, 
+                    'ocr_failed',  # Special status to trigger frontend fallback
+                    {'ocr_error': f'OCR terminated after {MAX_CONSECUTIVE_FAILURES} consecutive failures'}
+                )
+                return  # Exit early
         
         # Combine all OCR text
         full_ocr_text = '\n\n'.join(all_text)
@@ -641,7 +669,7 @@ def process_ocr_background(pdf_bytes: bytes, material_id: str, total_pages: int)
         
     except Exception as e:
         print(f"❌ Background OCR failed for {material_id}: {str(e)}")
-        update_material_progress(material_id, 0, 'failed')
+        update_material_progress(material_id, 0, 'ocr_failed', {'ocr_error': str(e)})
 
 
 @app.route('/extract-async', methods=['POST'])
