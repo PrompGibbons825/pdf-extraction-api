@@ -34,6 +34,11 @@ def get_openai_client():
         client = OpenAI(api_key=api_key)
     return client
 
+# Initialize EasyOCR reader ONCE at startup (takes time but only once)
+print("🚀 Initializing EasyOCR reader at startup...")
+ocr_reader = easyocr.Reader(['en'], gpu=False)
+print("✓ EasyOCR reader ready")
+
 def extract_pdf_to_images(pdf_bytes: bytes, dpi: int = 75, max_pages: int = 100) -> list:
     """Convert PDF bytes to images for vision-based extraction
     
@@ -119,9 +124,6 @@ def detect_handwriting_fast(pdf_bytes: bytes, max_pages: int = None) -> dict:
     try:
         print(f"Extracting handwriting with EasyOCR (all pages)...")
         
-        # Initialize EasyOCR reader once
-        reader = easyocr.Reader(['en'], gpu=False)
-        
         # Convert ALL pages to images
         images = pdf2image.convert_from_bytes(pdf_bytes, dpi=100)
         max_pages_to_process = len(images) if max_pages is None else min(max_pages, len(images))
@@ -135,7 +137,7 @@ def detect_handwriting_fast(pdf_bytes: bytes, max_pages: int = None) -> dict:
                 # Convert PIL Image to numpy array for EasyOCR
                 img_array = np.array(img)
                 # EasyOCR extract text
-                results = reader.readtext(img_array, detail=0)  # detail=0 gives just text
+                results = ocr_reader.readtext(img_array, detail=0)  # detail=0 gives just text
                 text = '\n'.join(results)
                 
                 if text.strip():
@@ -159,6 +161,16 @@ def detect_handwriting_fast(pdf_bytes: bytes, max_pages: int = None) -> dict:
     except Exception as e:
         print(f"Error detecting handwriting: {str(e)}")
         return {'has_handwriting': False, 'handwritten_sections': [], 'confidence': 0}
+        
+        print(f"EasyOCR extraction complete: {len(handwritten_sections)} pages with content")
+        return {
+            'has_handwriting': len(handwritten_sections) > 0,
+            'handwritten_sections': handwritten_sections,
+            'confidence': 0.85  # EasyOCR confidence
+        }
+    except Exception as e:
+        print(f"Error detecting handwriting: {str(e)}")
+        return {'has_handwriting': False, 'handwritten_sections': [], 'confidence': 0}
 
 def detect_handwriting_only(pdf_bytes: bytes) -> dict:
     """Quick handwriting detection WITHOUT full text extraction
@@ -168,7 +180,6 @@ def detect_handwriting_only(pdf_bytes: bytes) -> dict:
     """
     try:
         print("🔍 Quick handwriting detection (no text extraction)...")
-        reader = easyocr.Reader(['en'], gpu=False)
         
         images = pdf2image.convert_from_bytes(pdf_bytes, dpi=75)  # Lower DPI for speed
         
@@ -183,7 +194,7 @@ def detect_handwriting_only(pdf_bytes: bytes) -> dict:
                 img = images[idx]
                 # Convert PIL Image to numpy array for EasyOCR
                 img_array = np.array(img)
-                results = reader.readtext(img_array, detail=1)  # detail=1 gives confidence
+                results = ocr_reader.readtext(img_array, detail=1)  # detail=1 gives confidence
                 
                 # Check if any detected text has low confidence (likely handwriting)
                 # or has variable font sizes (characteristic of handwriting)
