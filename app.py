@@ -3,6 +3,7 @@ PDF Extraction API for Supabase Backend
 Flask app that processes PDFs and returns AI-optimized JSON context
 Deploy to Railway, Render, or any Python hosting
 Fast handwriting detection with 10-page chunk processing
+Supports async background OCR processing with progress updates
 """
 
 import os
@@ -18,10 +19,49 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import easyocr
 from PIL import Image
 import numpy as np
+import threading
 
 # Initialize Flask app
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 30 * 1024 * 1024  # 50MB max file size
+
+# Supabase configuration for direct database updates
+SUPABASE_URL = os.environ.get('SUPABASE_URL')
+SUPABASE_SERVICE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
+
+def update_material_progress(material_id: str, progress: int, status: str = 'processing', extra_data: dict = None):
+    """Update material processing progress in Supabase"""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY or not material_id:
+        print(f"⚠️ Cannot update progress - missing config or material_id")
+        return False
+    
+    try:
+        url = f"{SUPABASE_URL}/rest/v1/study_materials?id=eq.{material_id}"
+        headers = {
+            'apikey': SUPABASE_SERVICE_KEY,
+            'Authorization': f'Bearer {SUPABASE_SERVICE_KEY}',
+            'Content-Type': 'application/json',
+            'Prefer': 'return=minimal'
+        }
+        
+        data = {
+            'processing_progress': progress,
+            'processing_status': status
+        }
+        
+        if extra_data:
+            data.update(extra_data)
+        
+        response = requests.patch(url, json=data, headers=headers)
+        if response.status_code in [200, 204]:
+            print(f"✅ Updated progress: {progress}% (status: {status})")
+            return True
+        else:
+            print(f"⚠️ Failed to update progress: {response.status_code} - {response.text}")
+            return False
+    except Exception as e:
+        print(f"⚠️ Error updating progress: {str(e)}")
+        return False
 
 # Initialize OpenAI client lazily to allow app to start without API key
 client = None
@@ -536,6 +576,136 @@ def extract_pdf():
     except Exception as e:
         print(f"❌ Error: {str(e)}")
         return jsonify({'error': f'Server error: {str(e)}'}), 500
+
+
+def process_ocr_background(pdf_bytes: bytes, material_id: str, total_pages: int):
+    """Background task to process OCR on all pages and update progress"""
+    try:
+        print(f"🔄 Starting background OCR for material {material_id} ({total_pages} pages)")
+        
+        all_text = []
+        chunk_size = 5  # Process 5 pages at a time
+        
+        for chunk_start in range(0, total_pages, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, total_pages)
+            progress = int((chunk_start / total_pages) * 100)
+            
+            # Update progress in Supabase
+            update_material_progress(material_id, progress)
+            
+            print(f"📄 Processing pages {chunk_start + 1}-{chunk_end} ({progress}%)...")
+            
+            try:
+                # Convert chunk to images
+                images = pdf2image.convert_from_bytes(
+                    pdf_bytes,
+                    dpi=100,
+                    first_page=chunk_start + 1,
+                    last_page=chunk_end
+                )
+                
+                for img_idx, img in enumerate(images):
+                    page_num = chunk_start + img_idx + 1
+                    try:
+                        # Resize for faster OCR
+                        max_width = 1000
+                        if img.width > max_width:
+                            ratio = max_width / img.width
+                            new_size = (int(img.width * ratio), int(img.height * ratio))
+                            img = img.resize(new_size, Image.Resampling.LANCZOS)
+                        
+                        img_array = np.array(img)
+                        results = ocr_reader.readtext(img_array, detail=0)
+                        
+                        page_text = ' '.join(results)
+                        if page_text.strip():
+                            all_text.append(f"[Page {page_num}]\n{page_text}")
+                            
+                    except Exception as e:
+                        print(f"⚠️ Error on page {page_num}: {str(e)}")
+                        
+            except Exception as e:
+                print(f"⚠️ Error processing chunk {chunk_start}-{chunk_end}: {str(e)}")
+        
+        # Combine all OCR text
+        full_ocr_text = '\n\n'.join(all_text)
+        
+        # Update final progress and mark as completed
+        update_material_progress(
+            material_id, 
+            100, 
+            'completed',
+            {'content': full_ocr_text[:50000]} if full_ocr_text else None  # Limit to 50k chars
+        )
+        
+        print(f"✅ Background OCR complete for {material_id}: {len(full_ocr_text)} chars extracted")
+        
+    except Exception as e:
+        print(f"❌ Background OCR failed for {material_id}: {str(e)}")
+        update_material_progress(material_id, 0, 'failed')
+
+
+@app.route('/extract-async', methods=['POST'])
+def extract_async():
+    """
+    Start async OCR processing in background
+    Returns immediately, updates database with progress
+    """
+    try:
+        print("📋 Railway: Async OCR extraction request")
+        data = request.get_json()
+        
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+        
+        material_id = data.get('material_id')
+        if not material_id:
+            return jsonify({'error': 'material_id required for async processing'}), 400
+        
+        # Get PDF bytes
+        pdf_bytes = None
+        total_pages = 0
+        
+        if 'pdf_url' in data:
+            response = requests.get(data['pdf_url'], timeout=30)
+            if response.status_code != 200:
+                return jsonify({'error': f'Failed to fetch PDF: {response.status_code}'}), 400
+            pdf_bytes = response.content
+        elif 'pdf_base64' in data:
+            pdf_bytes = base64.b64decode(data['pdf_base64'])
+        else:
+            return jsonify({'error': 'Provide pdf_url or pdf_base64'}), 400
+        
+        # Get total pages
+        try:
+            pdf_file = io.BytesIO(pdf_bytes)
+            reader = pypdf.PdfReader(pdf_file)
+            total_pages = len(reader.pages)
+        except Exception as e:
+            return jsonify({'error': f'Failed to read PDF: {str(e)}'}), 400
+        
+        # Mark as processing
+        update_material_progress(material_id, 5, 'processing')
+        
+        # Start background thread
+        thread = threading.Thread(
+            target=process_ocr_background,
+            args=(pdf_bytes, material_id, total_pages)
+        )
+        thread.daemon = True
+        thread.start()
+        
+        return jsonify({
+            'success': True,
+            'message': 'OCR processing started',
+            'material_id': material_id,
+            'total_pages': total_pages
+        }), 202  # 202 Accepted
+    
+    except Exception as e:
+        print(f"❌ Error starting async processing: {str(e)}")
+        return jsonify({'error': f'Server error: {str(e)}'}), 500
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
