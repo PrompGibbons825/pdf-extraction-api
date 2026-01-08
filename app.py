@@ -13,6 +13,7 @@ from openai import OpenAI
 import pypdf
 import pdf2image
 import io
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -57,27 +58,57 @@ def extract_pdf_to_images(pdf_bytes: bytes, dpi: int = 75, max_pages: int = 100)
         return []
 
 def extract_text_structure(pdf_bytes: bytes) -> dict:
-    """Extract text and structure from PDF bytes"""
+    """Extract text and structure from PDF bytes using parallel processing for 100 pages"""
     try:
         pdf_file = io.BytesIO(pdf_bytes)
         reader = pypdf.PdfReader(pdf_file)
-        pages_data = []
+        total_pages = len(reader.pages)
+        max_pages = min(100, total_pages)  # Process up to 100 pages
         
-        for page_num, page in enumerate(reader.pages):
-            text = page.extract_text()
-            pages_data.append({
-                'page': page_num + 1,
-                'text': text,
-                'has_images': bool(page.images)
-            })
+        print(f"Extracting text from {max_pages} pages (parallel processing)...")
+        
+        # Extract pages in parallel (4 workers) for faster processing
+        pages_data = []
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {
+                executor.submit(_extract_single_page, reader, page_num): page_num 
+                for page_num in range(max_pages)
+            }
+            
+            for future in as_completed(futures):
+                try:
+                    page_data = future.result()
+                    pages_data.append(page_data)
+                except Exception as e:
+                    print(f"Error extracting page: {str(e)}")
+        
+        # Sort by page number to maintain order
+        pages_data.sort(key=lambda x: x['page'])
         
         return {
-            'total_pages': len(reader.pages),
+            'total_pages': total_pages,
             'pages': pages_data,
-            'has_images': any(p['has_images'] for p in pages_data)
+            'has_images': any(p.get('has_images', False) for p in pages_data)
         }
     except Exception as e:
         return {'error': str(e), 'total_pages': 0, 'pages': []}
+
+def _extract_single_page(reader, page_num: int) -> dict:
+    """Extract text and metadata from a single PDF page"""
+    try:
+        page = reader.pages[page_num]
+        text = page.extract_text()
+        return {
+            'page': page_num + 1,
+            'text': text,
+            'has_images': bool(page.images)
+        }
+    except Exception as e:
+        return {
+            'page': page_num + 1,
+            'text': f'Error: {str(e)}',
+            'has_images': False
+        }
 
 def encode_image_to_base64(image_bytes: bytes) -> str:
     """Encode image bytes to base64"""
