@@ -524,17 +524,13 @@ def extract_pdf():
                 return jsonify({'error': f'Invalid base64: {str(e)}'}), 400
         
         elif 'pdf_chunk' in data:
-            # Handle chunked PDF from frontend
+            # Handle REAL chunked PDF from frontend
+            # Chunk is now actual PDF bytes (base64 encoded), not JSON with page metadata
             try:
-                chunk_data_json = base64.b64decode(data['pdf_chunk']).decode('utf-8')
-                chunk_data = json.loads(chunk_data_json)
-                pdf_bytes = bytes(chunk_data['pdfBytes'])
-                start_page = chunk_data.get('startPage', 0)
-                end_page = chunk_data.get('endPage', chunk_data.get('totalPages', 0) - 1)
-                
+                pdf_bytes = base64.b64decode(data['pdf_chunk'])
                 chunk_index = data.get('chunk_index', 0)
                 chunk_count = data.get('chunk_count', 1)
-                print(f"📦 Processing chunk {chunk_index + 1}/{chunk_count} (pages {start_page}-{end_page})")
+                print(f"📦 Processing REAL PDF chunk {chunk_index + 1}/{chunk_count} ({len(pdf_bytes)} bytes)")
             except Exception as e:
                 return jsonify({'error': f'Invalid chunk data: {str(e)}'}), 400
         
