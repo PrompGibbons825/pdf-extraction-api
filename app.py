@@ -4,7 +4,7 @@ Flask app that processes PDFs and returns AI-optimized JSON context
 Deploy to Railway, Render, or any Python hosting
 Fast handwriting detection with 10-page chunk processing
 Supports async background OCR processing with progress updates
-Uses Replicate GPU for fast OCR
+Uses Google Cloud Vision for fast, cheap OCR
 """
 
 import os
@@ -20,7 +20,7 @@ import io
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image
 import threading
-import replicate
+from google.cloud import vision
 import time
 
 # Initialize Flask app
@@ -33,9 +33,27 @@ app.config['MAX_CONTENT_LENGTH'] = 30 * 1024 * 1024  # 50MB max file size
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
 SUPABASE_SERVICE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
 
-# Replicate API configuration
-REPLICATE_API_TOKEN = os.environ.get('REPLICATE_API_TOKEN')
-USE_REPLICATE_OCR = os.environ.get('USE_REPLICATE_OCR', 'true').lower() == 'true'
+# Google Cloud Vision configuration
+# Set GOOGLE_APPLICATION_CREDENTIALS env var to path of service account JSON
+# Or set GOOGLE_CLOUD_CREDENTIALS to the JSON content directly
+GOOGLE_CLOUD_CREDENTIALS = os.environ.get('GOOGLE_CLOUD_CREDENTIALS')
+
+# Initialize Google Vision client
+vision_client = None
+
+def get_vision_client():
+    """Lazy initialization of Google Cloud Vision client"""
+    global vision_client
+    if vision_client is None:
+        # If credentials JSON is provided as env var, write to temp file
+        if GOOGLE_CLOUD_CREDENTIALS:
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+                f.write(GOOGLE_CLOUD_CREDENTIALS)
+                os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = f.name
+        vision_client = vision.ImageAnnotatorClient()
+        print("✓ Google Cloud Vision client initialized")
+    return vision_client
 
 def update_material_progress(material_id: str, progress: int, status: str = 'processing', extra_data: dict = None):
     """Update material processing progress in Supabase"""
@@ -84,61 +102,60 @@ def get_openai_client():
     return client
 
 
-def ocr_with_replicate(image_base64: str) -> str:
+def ocr_with_google_vision(image_bytes: bytes) -> str:
     """
-    Run OCR on an image using Replicate's GPU-accelerated models
-    Uses lucataco/deepseek-ocr for high-accuracy document text extraction
+    Run OCR on an image using Google Cloud Vision API
+    Fast, accurate, and cost-effective (~$1.50/1000 images, first 1000 FREE/month)
     
     Args:
-        image_base64: Base64 encoded image string
+        image_bytes: Raw image bytes (PNG/JPEG)
     
     Returns:
         Extracted text from the image
     """
-    if not REPLICATE_API_TOKEN:
-        raise ValueError("REPLICATE_API_TOKEN not configured")
-    
     try:
-        # Create data URI for the image
-        image_uri = f"data:image/png;base64,{image_base64}"
+        client = get_vision_client()
         
-        # Run OCR model on Replicate using the correct API format
-        output = replicate.run(
-            "lucataco/deepseek-ocr:cb3b474fbfc56b1664c8c7841550bccecbe7b74c30e45ce938ffca1180b4dff5",
-            input={
-                "image": image_uri,
-                "task_type": "Free OCR"
-            }
-        )
+        # Create image object for Vision API
+        image = vision.Image(content=image_bytes)
         
-        # Output is the extracted text
-        return output if isinstance(output, str) else str(output)
+        # Use DOCUMENT_TEXT_DETECTION for best results on documents/handwriting
+        response = client.document_text_detection(image=image)
+        
+        if response.error.message:
+            raise Exception(f"Vision API error: {response.error.message}")
+        
+        # Extract full text from response
+        if response.full_text_annotation:
+            return response.full_text_annotation.text
+        
+        return ""
         
     except Exception as e:
-        print(f"⚠️ Replicate OCR error: {str(e)}")
+        print(f"⚠️ Google Vision OCR error: {str(e)}")
         raise
 
 
-def ocr_with_replicate_batch(images_base64: list) -> list:
+def ocr_with_google_vision_batch(images_bytes: list) -> list:
     """
-    Process multiple images with Replicate OCR with limited parallelism
+    Process multiple images with Google Cloud Vision OCR
     
-    With $5+ credit, rate limits are higher (600 req/min), so we can process
-    2 images at a time with minimal delays.
+    Google Vision is fast enough to process 5 images in parallel without issues.
+    No rate limit concerns for typical usage.
     
     Args:
-        images_base64: List of base64 encoded image strings
+        images_bytes: List of raw image bytes
     
     Returns:
         List of extracted text strings (one per image)
     """
-    results = [""] * len(images_base64)  # Pre-allocate results
+    results = [""] * len(images_bytes)
     
-    # Process 2 images at a time to balance speed vs rate limits
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    # Process 5 images at a time - Google Vision handles this well
+    with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {}
-        for idx, img_b64 in enumerate(images_base64):
-            futures[executor.submit(ocr_with_replicate, img_b64)] = idx
+        for idx, img_bytes in enumerate(images_bytes):
+            futures[executor.submit(ocr_with_google_vision, img_bytes)] = idx
         
         for future in as_completed(futures):
             idx = futures[future]
@@ -150,6 +167,13 @@ def ocr_with_replicate_batch(images_base64: list) -> list:
                 results[idx] = ""
     
     return results
+
+
+def image_to_bytes(img: Image.Image) -> bytes:
+    """Convert PIL Image to bytes"""
+    buffer = io.BytesIO()
+    img.save(buffer, format='PNG')
+    return buffer.getvalue()
 
 
 def image_to_base64(img: Image.Image) -> str:
@@ -240,30 +264,30 @@ def _extract_single_page(reader, page_num: int) -> dict:
         }
 
 def detect_handwriting_fast(pdf_bytes: bytes, max_pages: int = None) -> dict:
-    """Detect handwriting using Replicate OCR (GPU-accelerated)"""
+    """Detect handwriting using Google Cloud Vision OCR"""
     try:
-        print(f"Extracting handwriting with Replicate OCR...")
+        print(f"Extracting handwriting with Google Cloud Vision...")
         
         # Convert pages to images
         images = pdf2image.convert_from_bytes(pdf_bytes, dpi=100)
         max_pages_to_process = len(images) if max_pages is None else min(max_pages, len(images))
         
-        print(f"Processing {max_pages_to_process} pages with Replicate OCR...")
+        print(f"Processing {max_pages_to_process} pages with Google Vision...")
         handwritten_sections = []
         
         for idx in range(max_pages_to_process):
             try:
                 img = images[idx]
                 # Resize for faster processing
-                max_width = 1000
+                max_width = 1500
                 if img.width > max_width:
                     ratio = max_width / img.width
                     new_size = (int(img.width * ratio), int(img.height * ratio))
                     img = img.resize(new_size, Image.Resampling.LANCZOS)
                 
-                # Convert to base64 and run OCR
-                img_b64 = image_to_base64(img)
-                text = ocr_with_replicate(img_b64)
+                # Convert to bytes and run OCR
+                img_bytes = image_to_bytes(img)
+                text = ocr_with_google_vision(img_bytes)
                 
                 if text and text.strip():
                     handwritten_sections.append({
@@ -277,20 +301,20 @@ def detect_handwriting_fast(pdf_bytes: bytes, max_pages: int = None) -> dict:
             except Exception as e:
                 print(f"Error on page {idx + 1}: {str(e)}")
         
-        print(f"Replicate OCR extraction complete: {len(handwritten_sections)} pages with content")
+        print(f"Google Vision OCR extraction complete: {len(handwritten_sections)} pages with content")
         return {
             'has_handwriting': len(handwritten_sections) > 0,
             'handwritten_sections': handwritten_sections,
-            'confidence': 0.9
+            'confidence': 0.95
         }
     except Exception as e:
         print(f"Error detecting handwriting: {str(e)}")
         return {'has_handwriting': False, 'handwritten_sections': [], 'confidence': 0}
 
 def detect_handwriting_only(pdf_bytes: bytes) -> dict:
-    """Ultra-fast handwriting detection - samples only 1 page
+    """Quick handwriting detection - samples only 1 page
     
-    Designed to complete quickly. Uses Replicate OCR on first page only.
+    Uses Google Cloud Vision OCR on first page only for speed.
     """
     try:
         print("🔍 Quick handwriting detection (1-page sample)...")
@@ -309,15 +333,15 @@ def detect_handwriting_only(pdf_bytes: bytes) -> dict:
             if images:
                 img = images[0]
                 # Resize if needed
-                max_width = 1000
+                max_width = 1500
                 if img.width > max_width:
                     ratio = max_width / img.width
                     new_size = (int(img.width * ratio), int(img.height * ratio))
                     img = img.resize(new_size, Image.Resampling.LANCZOS)
                 
-                # Run OCR with Replicate
-                img_b64 = image_to_base64(img)
-                text = ocr_with_replicate(img_b64)
+                # Run OCR with Google Vision
+                img_bytes = image_to_bytes(img)
+                text = ocr_with_google_vision(img_bytes)
                 
                 # If we got text, assume it might have handwriting
                 if text and len(text.strip()) > 50:
@@ -331,7 +355,7 @@ def detect_handwriting_only(pdf_bytes: bytes) -> dict:
         return {
             'has_handwriting': has_handwriting,
             'handwritten_sections': [],
-            'confidence': 0.8
+            'confidence': 0.9
         }
     except Exception as e:
         print(f"Error in quick handwriting detection: {str(e)}")
@@ -552,13 +576,12 @@ Return ONLY valid JSON (no markdown):
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint - shows OCR configuration"""
-    use_replicate = USE_REPLICATE_OCR and REPLICATE_API_TOKEN
+    google_configured = bool(GOOGLE_CLOUD_CREDENTIALS or os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'))
     return jsonify({
         'status': 'ok', 
         'service': 'pdf-extraction-api',
-        'ocr_engine': 'replicate_gpu' if use_replicate else 'not_configured',
-        'replicate_configured': bool(REPLICATE_API_TOKEN),
-        'replicate_enabled': USE_REPLICATE_OCR,
+        'ocr_engine': 'google_cloud_vision' if google_configured else 'not_configured',
+        'google_vision_configured': google_configured,
         'supabase_configured': bool(SUPABASE_URL and SUPABASE_SERVICE_KEY),
         'supabase_url_set': bool(SUPABASE_URL)
     }), 200
@@ -664,7 +687,7 @@ def extract_pdf():
 def process_ocr_background(pdf_bytes: bytes, material_id: str, total_pages: int):
     """Background task to process OCR on all pages and update progress
     
-    Uses Replicate GPU for fast OCR.
+    Uses Google Cloud Vision for fast, cheap OCR.
     
     Implements 3-consecutive-failure termination:
     - If 3 chunks fail in a row, terminate processing
@@ -673,13 +696,14 @@ def process_ocr_background(pdf_bytes: bytes, material_id: str, total_pages: int)
     try:
         print(f"🔄 Starting background OCR for material {material_id} ({total_pages} pages)")
         
-        # Check Replicate is configured
-        if not USE_REPLICATE_OCR or not REPLICATE_API_TOKEN:
-            print(f"❌ Replicate OCR not configured - marking as failed")
+        # Check Google Cloud Vision is configured
+        google_configured = bool(GOOGLE_CLOUD_CREDENTIALS or os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'))
+        if not google_configured:
+            print(f"❌ Google Cloud Vision not configured - marking as failed")
             update_material_progress(material_id, 0, 'ocr_failed')
             return
         
-        print(f"🚀 Using Replicate GPU OCR")
+        print(f"🚀 Using Google Cloud Vision OCR")
         
         all_text = []
         chunk_size = 10  # Process 10 pages at a time for faster throughput
@@ -705,9 +729,9 @@ def process_ocr_background(pdf_bytes: bytes, material_id: str, total_pages: int)
                     last_page=chunk_end
                 )
                 
-                # REPLICATE GPU OCR - Process batch in parallel
-                # Resize and convert images to base64
-                images_b64 = []
+                # GOOGLE CLOUD VISION OCR - Process batch in parallel (5 at a time)
+                # Resize and convert images to bytes
+                images_bytes = []
                 for img in images:
                     # Resize for optimal OCR (max 2000px width)
                     max_width = 2000
@@ -715,10 +739,10 @@ def process_ocr_background(pdf_bytes: bytes, material_id: str, total_pages: int)
                         ratio = max_width / img.width
                         new_size = (int(img.width * ratio), int(img.height * ratio))
                         img = img.resize(new_size, Image.Resampling.LANCZOS)
-                    images_b64.append(image_to_base64(img))
+                    images_bytes.append(image_to_bytes(img))
                 
-                # Process batch with Replicate
-                ocr_results = ocr_with_replicate_batch(images_b64)
+                # Process batch with Google Vision
+                ocr_results = ocr_with_google_vision_batch(images_bytes)
                 
                 # Collect results
                 for img_idx, page_text in enumerate(ocr_results):
@@ -727,7 +751,7 @@ def process_ocr_background(pdf_bytes: bytes, material_id: str, total_pages: int)
                         all_text.append(f"[Page {page_num}]\n{page_text}")
                         chunk_success = True
                 
-                print(f"✅ Replicate OCR completed for chunk {chunk_start + 1}-{chunk_end}")
+                print(f"✅ Google Vision OCR completed for chunk {chunk_start + 1}-{chunk_end}")
                 
                 # If we got here without exception and got some text, reset failure counter
                 if chunk_success:
