@@ -422,14 +422,7 @@ def extract_pdf():
         if not pdf_bytes:
             return jsonify({'error': 'No PDF data'}), 400
         
-        # Extract text structure (fast text extraction)
-        print("Extracting text structure...")
-        structure = extract_text_structure(pdf_bytes)
-        
-        if structure.get('error'):
-            return jsonify({'error': f'Text extraction failed: {structure["error"]}'}), 400
-        
-        # Detect handwriting using EasyOCR (processes ALL pages for full document)
+        # Skip text extraction - go straight to EasyOCR for handwriting (faster)
         print("Extracting handwriting with EasyOCR...")
         handwriting = detect_handwriting_fast(pdf_bytes)
         
