@@ -117,10 +117,13 @@ def ocr_with_replicate(image_base64: str) -> str:
         # Create data URI for the image
         image_uri = f"data:image/png;base64,{image_base64}"
         
-        # Run OCR model on Replicate - using lucataco/deepseek-ocr for high accuracy
+        # Run OCR model on Replicate using the correct API format
         output = replicate.run(
-            "lucataco/deepseek-ocr",
-            input={"image": image_uri}
+            "lucataco/deepseek-ocr:cb3b474fbfc56b1664c8c7841550bccecbe7b74c30e45ce938ffca1180b4dff5",
+            input={
+                "image": image_uri,
+                "task_type": "Free OCR"
+            }
         )
         
         # Output is the extracted text
