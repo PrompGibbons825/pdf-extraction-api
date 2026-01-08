@@ -852,7 +852,7 @@ Return ONLY valid JSON (no markdown, no code blocks):
 }}"""
         
         response = get_openai_client().chat.completions.create(
-            model="gpt-4o-mini",  # Use mini for cost efficiency
+            model="gpt-4.1-nano",  # Ultra-cheap, super fast
             max_tokens=500,
             messages=[
                 {
