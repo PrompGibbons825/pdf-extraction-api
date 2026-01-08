@@ -60,12 +60,12 @@ def extract_pdf_to_images(pdf_bytes: bytes, dpi: int = 75, max_pages: int = 100)
         return []
 
 def extract_text_structure(pdf_bytes: bytes) -> dict:
-    """Extract text and structure from PDF bytes using parallel processing for 150 pages"""
+    """Extract text and structure from PDF bytes using parallel processing for 40 pages"""
     try:
         pdf_file = io.BytesIO(pdf_bytes)
         reader = pypdf.PdfReader(pdf_file)
         total_pages = len(reader.pages)
-        max_pages = min(150, total_pages)  # Process up to 150 pages
+        max_pages = min(40, total_pages)  # Process up to 40 pages (~40 seconds)
         
         print(f"Extracting text from {max_pages} pages (parallel processing)...")
         
@@ -415,7 +415,7 @@ def extract_pdf():
         
         # Detect handwriting using Tesseract (fast, local, no API)
         print("Detecting handwriting with Tesseract...")
-        handwriting = detect_handwriting_fast(pdf_bytes, max_pages=3)
+        handwriting = detect_handwriting_fast(pdf_bytes, max_pages=1)
         
         # Create response with extracted text + handwriting detection
         ai_context = {
