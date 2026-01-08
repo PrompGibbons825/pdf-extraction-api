@@ -58,12 +58,12 @@ def extract_pdf_to_images(pdf_bytes: bytes, dpi: int = 75, max_pages: int = 100)
         return []
 
 def extract_text_structure(pdf_bytes: bytes) -> dict:
-    """Extract text and structure from PDF bytes using parallel processing for 100 pages"""
+    """Extract text and structure from PDF bytes using parallel processing for 50 pages"""
     try:
         pdf_file = io.BytesIO(pdf_bytes)
         reader = pypdf.PdfReader(pdf_file)
         total_pages = len(reader.pages)
-        max_pages = min(100, total_pages)  # Process up to 100 pages
+        max_pages = min(50, total_pages)  # Process up to 50 pages (faster)
         
         print(f"Extracting text from {max_pages} pages (parallel processing)...")
         
@@ -117,12 +117,12 @@ def encode_image_to_base64(image_bytes: bytes) -> str:
 def analyze_document_with_vision(pdf_bytes: bytes) -> dict:
     """
     Use OpenAI's vision to analyze PDF for handwriting and content
-    Optimized for speed - processes first 3 pages only
+    Optimized for speed - processes first 1 page only
     """
     try:
-        # Convert PDF to images (limited to first 3 pages, 100 DPI for speed)
+        # Convert PDF to images (limited to first 1 page, 100 DPI for speed)
         print("Starting vision analysis...")
-        images = extract_pdf_to_images(pdf_bytes, dpi=100, max_pages=3)
+        images = extract_pdf_to_images(pdf_bytes, dpi=100, max_pages=1)
         
         if not images:
             print("No images extracted, returning minimal analysis")
