@@ -2,6 +2,7 @@
 PDF Extraction API for Supabase Backend
 Flask app that processes PDFs and returns AI-optimized JSON context
 Deploy to Railway, Render, or any Python hosting
+Fast handwriting detection with 10-page chunk processing
 """
 
 import os
