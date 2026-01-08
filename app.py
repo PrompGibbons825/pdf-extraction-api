@@ -14,7 +14,7 @@ import pypdf
 import pdf2image
 import io
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import pytesseract
+import easyocr
 from PIL import Image
 
 # Initialize Flask app
@@ -60,12 +60,13 @@ def extract_pdf_to_images(pdf_bytes: bytes, dpi: int = 75, max_pages: int = 100)
         return []
 
 def extract_text_structure(pdf_bytes: bytes) -> dict:
-    """Extract text and structure from PDF bytes using parallel processing for 40 pages"""
+    """Extract text and structure from PDF bytes using parallel processing for ALL pages"""
     try:
         pdf_file = io.BytesIO(pdf_bytes)
         reader = pypdf.PdfReader(pdf_file)
         total_pages = len(reader.pages)
-        max_pages = min(40, total_pages)  # Process up to 40 pages (~40 seconds)
+        # Process ALL pages
+        max_pages = total_pages
         
         print(f"Extracting text from {max_pages} pages (parallel processing)...")
         
@@ -112,30 +113,45 @@ def _extract_single_page(reader, page_num: int) -> dict:
             'has_images': False
         }
 
-def detect_handwriting_fast(pdf_bytes: bytes, max_pages: int = 3) -> dict:
-    """Detect handwriting using Tesseract OCR (fast, local, no API)"""
+def detect_handwriting_fast(pdf_bytes: bytes, max_pages: int = None) -> dict:
+    """Detect handwriting using EasyOCR (fast, lightweight, best for handwriting)"""
     try:
-        print(f"Detecting handwriting with Tesseract (first {max_pages} pages)...")
-        images = pdf2image.convert_from_bytes(pdf_bytes, dpi=150, first_page=1, last_page=max_pages)
+        print(f"Extracting handwriting with EasyOCR (all pages)...")
         
+        # Initialize EasyOCR reader once
+        reader = easyocr.Reader(['en'], gpu=False)
+        
+        # Convert ALL pages to images
+        images = pdf2image.convert_from_bytes(pdf_bytes, dpi=100)
+        max_pages_to_process = len(images) if max_pages is None else min(max_pages, len(images))
+        
+        print(f"Processing {max_pages_to_process} pages with EasyOCR...")
         handwritten_sections = []
-        for idx, img in enumerate(images):
+        
+        for idx in range(max_pages_to_process):
             try:
-                # Use Tesseract to extract text
-                text = pytesseract.image_to_string(img, config='--psm 6')
+                img = images[idx]
+                # EasyOCR extract text
+                results = reader.readtext(img, detail=0)  # detail=0 gives just text
+                text = '\n'.join(results)
+                
                 if text.strip():
                     handwritten_sections.append({
                         'page': idx + 1,
                         'content': text.strip()
                     })
-                print(f"Scanned page {idx + 1} for handwriting")
+                
+                if (idx + 1) % 10 == 0:
+                    print(f"Extracted {idx + 1}/{max_pages_to_process} pages")
+                    
             except Exception as e:
-                print(f"Error scanning page {idx + 1}: {str(e)}")
+                print(f"Error on page {idx + 1}: {str(e)}")
         
+        print(f"EasyOCR extraction complete: {len(handwritten_sections)} pages with content")
         return {
             'has_handwriting': len(handwritten_sections) > 0,
             'handwritten_sections': handwritten_sections,
-            'confidence': 0.7  # Tesseract confidence
+            'confidence': 0.85  # EasyOCR confidence
         }
     except Exception as e:
         print(f"Error detecting handwriting: {str(e)}")
@@ -406,30 +422,24 @@ def extract_pdf():
         if not pdf_bytes:
             return jsonify({'error': 'No PDF data'}), 400
         
-        # Extract text structure
+        # Extract text structure (fast text extraction)
         print("Extracting text structure...")
         structure = extract_text_structure(pdf_bytes)
         
         if structure.get('error'):
             return jsonify({'error': f'Text extraction failed: {structure["error"]}'}), 400
         
-        # Detect handwriting using Tesseract (fast, local, no API)
-        print("Detecting handwriting with Tesseract...")
-        handwriting = detect_handwriting_fast(pdf_bytes, max_pages=1)
+        # Detect handwriting using EasyOCR (processes ALL pages for full document)
+        print("Extracting handwriting with EasyOCR...")
+        handwriting = detect_handwriting_fast(pdf_bytes)
         
-        # Create response with extracted text + handwriting detection
+        # Create response with both text extraction + handwriting OCR
         ai_context = {
             'title': 'Extracted Document',
-            'document_type': 'PDF Document',
-            'overview': f"Document with {structure['total_pages']} pages extracted",
+            'document_type': 'PDF Document (Handwritten)',
+            'overview': f"Handwritten document with {len(handwriting.get('handwritten_sections', []))} pages extracted",
             'key_concepts': [],
-            'sections': [
-                {
-                    'title': f'Page {p["page"]}',
-                    'content': p['text'][:500] if p['text'] else 'No text extracted'
-                }
-                for p in structure['pages'][:10]  # First 10 pages
-            ],
+            'sections': handwriting.get('handwritten_sections', [])[:20],  # First 20 pages
             'definitions': [],
             'learning_objectives': [],
             'difficulty_level': 'Unknown',
@@ -437,17 +447,19 @@ def extract_pdf():
             'tables': [],
             'diagrams': [],
             'key_formulas': [],
-            'full_text': '\n\n'.join([p['text'] for p in structure['pages'] if p['text']])
+            'full_text': '\n\n---PAGE BREAK---\n\n'.join([
+                s.get('content', '') for s in handwriting.get('handwritten_sections', [])
+            ])
         }
         
         return jsonify({
             'success': True,
             'ai_context': ai_context,
             'metadata': {
-                'total_pages': structure['total_pages'],
+                'total_pages': len(handwriting.get('handwritten_sections', [])),
                 'has_handwriting': handwriting.get('has_handwriting', False),
                 'handwriting_pages': len(handwriting.get('handwritten_sections', [])),
-                'extraction_method': 'tesseract_ocr_fast'
+                'extraction_method': 'easyocr_full_document'
             }
         }), 200
     

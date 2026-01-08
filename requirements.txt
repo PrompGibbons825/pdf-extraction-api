@@ -6,4 +6,4 @@ requests==2.31.0
 gunicorn==21.2.0
 python-dotenv==1.0.0
 Pillow>=10.0.0
-pytesseract==0.3.10
+easyocr==1.7.0
