@@ -165,9 +165,8 @@ def detect_handwriting_fast(pdf_bytes: bytes, max_pages: int = None) -> dict:
 def detect_handwriting_only(pdf_bytes: bytes) -> dict:
     """Quick handwriting detection WITHOUT full text extraction
     
-    Only determines if handwriting exists, doesn't extract all text.
-    This is MUCH faster for handwriting_only mode.
-    Memory-efficient: only converts the pages we need.
+    Process PDF in 10-page chunks to manage memory while checking entire document.
+    Memory-efficient: loads only 10 pages at a time.
     """
     try:
         print("🔍 Quick handwriting detection (no text extraction)...")
@@ -178,52 +177,52 @@ def detect_handwriting_only(pdf_bytes: bytes) -> dict:
         total_pages = len(reader.pages)
         print(f"Total pages: {total_pages}")
         
-        # Determine which pages to sample (first, last, and a few in middle)
-        pages_to_check = [0]  # Always first page
-        if total_pages > 1:
-            pages_to_check.append(total_pages - 1)  # Last page
-        # Add a few middle pages
-        if total_pages > 10:
-            pages_to_check.extend([total_pages // 4, total_pages // 2, (3 * total_pages) // 4])
-        
-        pages_to_check = sorted(set(pages_to_check))  # Remove duplicates and sort
-        print(f"Sampling pages: {pages_to_check}")
-        
         has_handwriting = False
+        chunk_size = 10
         
-        # Convert only the pages we need (one at a time to save memory)
-        for page_num in pages_to_check:
-            if page_num >= total_pages:
-                continue
+        # Process PDF in 10-page chunks
+        for chunk_start in range(0, total_pages, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, total_pages)
+            print(f"Processing pages {chunk_start + 1}-{chunk_end}...")
+            
             try:
-                # Convert only this specific page
+                # Convert only this chunk of pages
                 images = pdf2image.convert_from_bytes(
                     pdf_bytes, 
                     dpi=50,  # Very low DPI to save memory
-                    first_page=page_num + 1, 
-                    last_page=page_num + 1
+                    first_page=chunk_start + 1, 
+                    last_page=chunk_end
                 )
                 
                 if not images:
                     continue
                 
-                img = images[0]
-                img_array = np.array(img)
-                results = ocr_reader.readtext(img_array, detail=1)
-                
-                # Check if any detected text has low confidence (likely handwriting)
-                for result in results:
-                    confidence = result[2]
-                    if confidence < 0.4:  # Low confidence = likely handwriting
-                        has_handwriting = True
-                        print(f"Handwriting detected on page {page_num + 1}")
-                        break
+                # Check each page in the chunk
+                for img_idx, img in enumerate(images):
+                    page_num = chunk_start + img_idx
+                    try:
+                        img_array = np.array(img)
+                        results = ocr_reader.readtext(img_array, detail=1)
+                        
+                        # Check if any detected text has low confidence (likely handwriting)
+                        for result in results:
+                            confidence = result[2]
+                            if confidence < 0.4:  # Low confidence = likely handwriting
+                                has_handwriting = True
+                                print(f"Handwriting detected on page {page_num + 1}")
+                                break
+                        
+                        if has_handwriting:
+                            break
+                            
+                    except Exception as e:
+                        print(f"Error processing page {page_num + 1}: {str(e)}")
                 
                 if has_handwriting:
                     break
                     
             except Exception as e:
-                print(f"Sample page {page_num}: {str(e)}")
+                print(f"Error processing chunk {chunk_start}-{chunk_end}: {str(e)}")
         
         print(f"✓ Handwriting detection complete: {has_handwriting}")
         return {
