@@ -823,12 +823,24 @@ def generate_material_metadata(ocr_text: str, total_pages: int) -> dict:
         Dictionary with title, summary, and topics
     """
     try:
-        # Use first 8000 chars for analysis (enough context, stays under token limits)
-        text_sample = ocr_text[:8000]
+        # Sample from beginning, middle, and end for better coverage (25k total)
+        text_len = len(ocr_text)
+        if text_len <= 25000:
+            text_sample = ocr_text
+        else:
+            # Take ~10k from beginning, ~7.5k from middle, ~7.5k from end
+            beginning = ocr_text[:10000]
+            
+            middle_start = (text_len // 2) - 3750
+            middle = ocr_text[middle_start:middle_start + 7500]
+            
+            end = ocr_text[-7500:]
+            
+            text_sample = f"{beginning}\n\n[...middle section...]\n\n{middle}\n\n[...end section...]\n\n{end}"
         
         prompt = f"""Analyze this document content and generate metadata.
 
-Document text (from {total_pages} pages):
+Document text (from {total_pages} pages, sampled from beginning, middle, and end):
 {text_sample}
 
 Return ONLY valid JSON (no markdown, no code blocks):
