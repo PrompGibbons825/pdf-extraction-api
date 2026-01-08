@@ -483,7 +483,7 @@ def extract_pdf():
         
         pdf_bytes = None
         
-        # Get PDF from URL or base64
+        # Get PDF from URL, base64, or chunk
         if 'pdf_url' in data:
             pdf_url = data['pdf_url']
             try:
@@ -499,8 +499,23 @@ def extract_pdf():
             except Exception as e:
                 return jsonify({'error': f'Invalid base64: {str(e)}'}), 400
         
+        elif 'pdf_chunk' in data:
+            # Handle chunked PDF from frontend
+            try:
+                chunk_data_json = base64.b64decode(data['pdf_chunk']).decode('utf-8')
+                chunk_data = json.loads(chunk_data_json)
+                pdf_bytes = bytes(chunk_data['pdfBytes'])
+                start_page = chunk_data.get('startPage', 0)
+                end_page = chunk_data.get('endPage', chunk_data.get('totalPages', 0) - 1)
+                
+                chunk_index = data.get('chunk_index', 0)
+                chunk_count = data.get('chunk_count', 1)
+                print(f"📦 Processing chunk {chunk_index + 1}/{chunk_count} (pages {start_page}-{end_page})")
+            except Exception as e:
+                return jsonify({'error': f'Invalid chunk data: {str(e)}'}), 400
+        
         else:
-            return jsonify({'error': 'Provide either pdf_url or pdf_base64'}), 400
+            return jsonify({'error': 'Provide pdf_url, pdf_base64, or pdf_chunk'}), 400
         
         if not pdf_bytes:
             return jsonify({'error': 'No PDF data'}), 400
