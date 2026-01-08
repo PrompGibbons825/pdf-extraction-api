@@ -60,12 +60,12 @@ def extract_pdf_to_images(pdf_bytes: bytes, dpi: int = 75, max_pages: int = 100)
         return []
 
 def extract_text_structure(pdf_bytes: bytes) -> dict:
-    """Extract text and structure from PDF bytes using parallel processing for 50 pages"""
+    """Extract text and structure from PDF bytes using parallel processing for 150 pages"""
     try:
         pdf_file = io.BytesIO(pdf_bytes)
         reader = pypdf.PdfReader(pdf_file)
         total_pages = len(reader.pages)
-        max_pages = min(50, total_pages)  # Process up to 50 pages (faster)
+        max_pages = min(150, total_pages)  # Process up to 150 pages
         
         print(f"Extracting text from {max_pages} pages (parallel processing)...")
         
