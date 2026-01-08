@@ -793,7 +793,7 @@ def process_ocr_background(pdf_bytes: bytes, material_id: str, total_pages: int)
             if ai_metadata.get('summary'):
                 update_data['summary'] = ai_metadata['summary']
             if ai_metadata.get('topics') and len(ai_metadata['topics']) > 0:
-                update_data['topic'] = ai_metadata['topics'][0]  # Primary topic
+                update_data['topics'] = ai_metadata['topics']  # Array of topics
             print(f"✅ AI metadata generated: {ai_metadata.get('title', 'N/A')}")
         
         # Update final progress and mark as completed
