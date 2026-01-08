@@ -136,11 +136,10 @@ def ocr_with_replicate(image_base64: str) -> str:
 
 def ocr_with_replicate_batch(images_base64: list) -> list:
     """
-    Process multiple images with Replicate OCR sequentially with delays
+    Process multiple images with Replicate OCR with limited parallelism
     
-    Respects Replicate's rate limits:
-    - 6 requests per minute when credit < $5
-    - Sequential processing with 500ms delays between requests
+    With $5+ credit, rate limits are higher (600 req/min), so we can process
+    2 images at a time with minimal delays.
     
     Args:
         images_base64: List of base64 encoded image strings
@@ -148,21 +147,22 @@ def ocr_with_replicate_batch(images_base64: list) -> list:
     Returns:
         List of extracted text strings (one per image)
     """
-    results = []
+    results = [""] * len(images_base64)  # Pre-allocate results
     
-    # Process images SEQUENTIALLY with delays to respect rate limits
-    for idx, img_b64 in enumerate(images_base64):
-        try:
-            text = ocr_with_replicate(img_b64)
-            results.append(text)
-            
-            # Add delay between requests (500ms) to respect rate limits
-            if idx < len(images_base64) - 1:
-                time.sleep(0.5)
-                
-        except Exception as e:
-            print(f"⚠️ OCR failed for image {idx}: {str(e)}")
-            results.append("")
+    # Process 2 images at a time to balance speed vs rate limits
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {}
+        for idx, img_b64 in enumerate(images_base64):
+            futures[executor.submit(ocr_with_replicate, img_b64)] = idx
+        
+        for future in as_completed(futures):
+            idx = futures[future]
+            try:
+                text = future.result()
+                results[idx] = text
+            except Exception as e:
+                print(f"⚠️ OCR failed for image {idx}: {str(e)}")
+                results[idx] = ""
     
     return results
 
@@ -697,7 +697,7 @@ def process_ocr_background(pdf_bytes: bytes, material_id: str, total_pages: int)
             print(f"⚠️ Using EasyOCR CPU fallback (slower)")
         
         all_text = []
-        chunk_size = 5  # Process 5 pages at a time
+        chunk_size = 10  # Process 10 pages at a time for faster throughput
         consecutive_failures = 0  # Track consecutive chunk failures
         MAX_CONSECUTIVE_FAILURES = 3
         
