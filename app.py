@@ -16,7 +16,7 @@ import io
 
 # Initialize Flask app
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB max file size
+app.config['MAX_CONTENT_LENGTH'] = 30 * 1024 * 1024  # 50MB max file size
 
 # Initialize OpenAI client lazily to allow app to start without API key
 client = None
@@ -30,17 +30,27 @@ def get_openai_client():
         client = OpenAI(api_key=api_key)
     return client
 
-def extract_pdf_to_images(pdf_bytes: bytes, dpi: int = 200) -> list:
-    """Convert PDF bytes to images for vision-based extraction"""
+def extract_pdf_to_images(pdf_bytes: bytes, dpi: int = 75, max_pages: int = 100) -> list:
+    """Convert PDF bytes to images for vision-based extraction
+    
+    Args:
+        pdf_bytes: PDF file content as bytes
+        dpi: Resolution for image conversion (lower = faster), default 150
+        max_pages: Maximum pages to convert (limits processing time)
+    """
     try:
-        images = pdf2image.convert_from_bytes(pdf_bytes, dpi=dpi)
+        # Convert only first N pages to save time
+        print(f"Converting PDF to images (DPI: {dpi}, max pages: {max_pages})...")
+        images = pdf2image.convert_from_bytes(pdf_bytes, dpi=dpi, first_page=1, last_page=max_pages)
         image_bytes = []
         
-        for img in images:
+        for idx, img in enumerate(images):
             buffer = io.BytesIO()
             img.save(buffer, format='PNG')
             image_bytes.append(buffer.getvalue())
+            print(f"Converted page {idx + 1}")
         
+        print(f"Successfully converted {len(image_bytes)} pages to images")
         return image_bytes
     except Exception as e:
         print(f"Error converting PDF to images: {str(e)}")
@@ -76,15 +86,20 @@ def encode_image_to_base64(image_bytes: bytes) -> str:
 def analyze_document_with_vision(pdf_bytes: bytes) -> dict:
     """
     Use OpenAI's vision to analyze PDF for handwriting and content
+    Optimized for speed - processes first 3 pages only
     """
     try:
-        images = extract_pdf_to_images(pdf_bytes)
+        # Convert PDF to images (limited to first 3 pages, 100 DPI for speed)
+        print("Starting vision analysis...")
+        images = extract_pdf_to_images(pdf_bytes, dpi=100, max_pages=3)
         
         if not images:
+            print("No images extracted, returning minimal analysis")
             return {'error': 'Could not convert PDF to images', 'has_handwriting': False}
         
-        # Process first 10 pages for analysis
-        images_to_process = images[:10]
+        # All images are already limited to 3 pages
+        images_to_process = images
+        print(f"Processing {len(images_to_process)} pages with vision API...")
         
         content = [
             {
@@ -113,6 +128,7 @@ Return ONLY valid JSON (no markdown, no extra text):
         
         # Add images to content
         for idx, img_bytes in enumerate(images_to_process):
+            print(f"Adding image {idx + 1} to vision request...")
             base64_img = encode_image_to_base64(img_bytes)
             content.append({
                 "type": "image_url",
@@ -122,6 +138,7 @@ Return ONLY valid JSON (no markdown, no extra text):
             })
         
         # Call OpenAI with vision (FIXED: use chat.completions.create, not messages.create)
+        print("Calling OpenAI Vision API...")
         response = get_openai_client().chat.completions.create(
             model="gpt-4o",
             max_tokens=3000,
