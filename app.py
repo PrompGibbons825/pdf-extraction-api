@@ -4,6 +4,7 @@ Flask app that processes PDFs and returns AI-optimized JSON context
 Deploy to Railway, Render, or any Python hosting
 Fast handwriting detection with 10-page chunk processing
 Supports async background OCR processing with progress updates
+Uses Replicate GPU for fast OCR, falls back to EasyOCR (CPU) if needed
 """
 
 import os
@@ -21,6 +22,8 @@ import easyocr
 from PIL import Image
 import numpy as np
 import threading
+import replicate
+import time
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -31,6 +34,10 @@ app.config['MAX_CONTENT_LENGTH'] = 30 * 1024 * 1024  # 50MB max file size
 # Supabase configuration for direct database updates
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
 SUPABASE_SERVICE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
+
+# Replicate API configuration
+REPLICATE_API_TOKEN = os.environ.get('REPLICATE_API_TOKEN')
+USE_REPLICATE_OCR = os.environ.get('USE_REPLICATE_OCR', 'true').lower() == 'true'
 
 def update_material_progress(material_id: str, progress: int, status: str = 'processing', extra_data: dict = None):
     """Update material processing progress in Supabase"""
@@ -79,9 +86,94 @@ def get_openai_client():
     return client
 
 # Initialize EasyOCR reader ONCE at startup (takes time but only once)
-print("🚀 Initializing EasyOCR reader at startup...")
-ocr_reader = easyocr.Reader(['en'], gpu=False)
-print("✓ EasyOCR reader ready")
+# Only initialize if Replicate is not available (saves memory)
+ocr_reader = None
+
+def get_easyocr_reader():
+    """Lazy initialization of EasyOCR reader (fallback for when Replicate fails)"""
+    global ocr_reader
+    if ocr_reader is None:
+        print("🚀 Initializing EasyOCR reader (fallback)...")
+        ocr_reader = easyocr.Reader(['en'], gpu=False)
+        print("✓ EasyOCR reader ready")
+    return ocr_reader
+
+
+def ocr_with_replicate(image_base64: str) -> str:
+    """
+    Run OCR on an image using Replicate's GPU-accelerated models
+    Uses abiruyt/text-extract-ocr for document text extraction
+    
+    Args:
+        image_base64: Base64 encoded image string
+    
+    Returns:
+        Extracted text from the image
+    """
+    if not REPLICATE_API_TOKEN:
+        raise ValueError("REPLICATE_API_TOKEN not configured")
+    
+    try:
+        # Create data URI for the image
+        image_uri = f"data:image/png;base64,{image_base64}"
+        
+        # Run OCR model on Replicate
+        # Using abiruyt/text-extract-ocr - good for document OCR
+        output = replicate.run(
+            "abiruyt/text-extract-ocr:a524caeaa23495bc9edc805ab08ab5fe943afd3f34571a2d9f33f4d3a3f8f3aa",
+            input={"image": image_uri}
+        )
+        
+        # Output is the extracted text
+        return output if isinstance(output, str) else str(output)
+        
+    except Exception as e:
+        print(f"⚠️ Replicate OCR error: {str(e)}")
+        raise
+
+
+def ocr_with_replicate_batch(images_base64: list) -> list:
+    """
+    Process multiple images with Replicate OCR in parallel
+    
+    Args:
+        images_base64: List of base64 encoded image strings
+    
+    Returns:
+        List of extracted text strings (one per image)
+    """
+    results = []
+    
+    # Process images in parallel using ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {
+            executor.submit(ocr_with_replicate, img_b64): idx 
+            for idx, img_b64 in enumerate(images_base64)
+        }
+        
+        # Collect results maintaining order
+        result_map = {}
+        for future in as_completed(futures):
+            idx = futures[future]
+            try:
+                text = future.result()
+                result_map[idx] = text
+            except Exception as e:
+                print(f"⚠️ OCR failed for image {idx}: {str(e)}")
+                result_map[idx] = ""
+        
+        # Sort by index
+        results = [result_map.get(i, "") for i in range(len(images_base64))]
+    
+    return results
+
+
+def image_to_base64(img: Image.Image) -> str:
+    """Convert PIL Image to base64 string"""
+    buffer = io.BytesIO()
+    img.save(buffer, format='PNG')
+    return base64.b64encode(buffer.getvalue()).decode('utf-8')
+
 
 def extract_pdf_to_images(pdf_bytes: bytes, dpi: int = 75, max_pages: int = 100) -> list:
     """Convert PDF bytes to images for vision-based extraction
@@ -174,6 +266,7 @@ def detect_handwriting_fast(pdf_bytes: bytes, max_pages: int = None) -> dict:
         
         print(f"Processing {max_pages_to_process} pages with EasyOCR...")
         handwritten_sections = []
+        reader = get_easyocr_reader()  # Lazy load EasyOCR
         
         for idx in range(max_pages_to_process):
             try:
@@ -181,7 +274,7 @@ def detect_handwriting_fast(pdf_bytes: bytes, max_pages: int = None) -> dict:
                 # Convert PIL Image to numpy array for EasyOCR
                 img_array = np.array(img)
                 # EasyOCR extract text
-                results = ocr_reader.readtext(img_array, detail=0)  # detail=0 gives just text
+                results = reader.readtext(img_array, detail=0)  # detail=0 gives just text
                 text = '\n'.join(results)
                 
                 if text.strip():
@@ -239,7 +332,8 @@ def detect_handwriting_only(pdf_bytes: bytes) -> dict:
                 print(f"Processing image: {img_array.shape}")
                 
                 # Quick OCR check
-                results = ocr_reader.readtext(img_array, detail=1)
+                reader = get_easyocr_reader()  # Lazy load EasyOCR
+                results = reader.readtext(img_array, detail=1)
                 
                 # Check if any detected text has low confidence (likely handwriting)
                 for result in results:
@@ -476,8 +570,15 @@ Return ONLY valid JSON (no markdown):
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Health check endpoint"""
-    return jsonify({'status': 'ok', 'service': 'pdf-extraction-api'}), 200
+    """Health check endpoint - shows OCR configuration"""
+    use_replicate = USE_REPLICATE_OCR and REPLICATE_API_TOKEN
+    return jsonify({
+        'status': 'ok', 
+        'service': 'pdf-extraction-api',
+        'ocr_engine': 'replicate_gpu' if use_replicate else 'easyocr_cpu',
+        'replicate_configured': bool(REPLICATE_API_TOKEN),
+        'replicate_enabled': USE_REPLICATE_OCR
+    }), 200
 
 @app.route('/extract', methods=['POST'])
 def extract_pdf():
@@ -580,12 +681,21 @@ def extract_pdf():
 def process_ocr_background(pdf_bytes: bytes, material_id: str, total_pages: int):
     """Background task to process OCR on all pages and update progress
     
+    Uses Replicate GPU for fast OCR, falls back to EasyOCR (CPU) if Replicate fails.
+    
     Implements 3-consecutive-failure termination:
     - If 3 chunks fail in a row, terminate processing
     - Mark status as 'ocr_failed' to trigger frontend fallback
     """
     try:
         print(f"🔄 Starting background OCR for material {material_id} ({total_pages} pages)")
+        
+        # Determine OCR method
+        use_replicate = USE_REPLICATE_OCR and REPLICATE_API_TOKEN
+        if use_replicate:
+            print(f"🚀 Using Replicate GPU OCR (faster)")
+        else:
+            print(f"⚠️ Using EasyOCR CPU fallback (slower)")
         
         all_text = []
         chunk_size = 5  # Process 5 pages at a time
@@ -606,31 +716,65 @@ def process_ocr_background(pdf_bytes: bytes, material_id: str, total_pages: int)
                 # Convert chunk to images
                 images = pdf2image.convert_from_bytes(
                     pdf_bytes,
-                    dpi=100,
+                    dpi=150,  # Higher DPI for better OCR quality
                     first_page=chunk_start + 1,
                     last_page=chunk_end
                 )
                 
-                for img_idx, img in enumerate(images):
-                    page_num = chunk_start + img_idx + 1
+                if use_replicate:
+                    # REPLICATE GPU OCR - Process batch in parallel
                     try:
-                        # Resize for faster OCR
-                        max_width = 1000
-                        if img.width > max_width:
-                            ratio = max_width / img.width
-                            new_size = (int(img.width * ratio), int(img.height * ratio))
-                            img = img.resize(new_size, Image.Resampling.LANCZOS)
+                        # Resize and convert images to base64
+                        images_b64 = []
+                        for img in images:
+                            # Resize for optimal OCR (max 2000px width)
+                            max_width = 2000
+                            if img.width > max_width:
+                                ratio = max_width / img.width
+                                new_size = (int(img.width * ratio), int(img.height * ratio))
+                                img = img.resize(new_size, Image.Resampling.LANCZOS)
+                            images_b64.append(image_to_base64(img))
                         
-                        img_array = np.array(img)
-                        results = ocr_reader.readtext(img_array, detail=0)
+                        # Process batch with Replicate
+                        ocr_results = ocr_with_replicate_batch(images_b64)
                         
-                        page_text = ' '.join(results)
-                        if page_text.strip():
-                            all_text.append(f"[Page {page_num}]\n{page_text}")
-                            chunk_success = True  # At least one page had content
+                        # Collect results
+                        for img_idx, page_text in enumerate(ocr_results):
+                            page_num = chunk_start + img_idx + 1
+                            if page_text and page_text.strip():
+                                all_text.append(f"[Page {page_num}]\n{page_text}")
+                                chunk_success = True
+                        
+                        print(f"✅ Replicate OCR completed for chunk {chunk_start + 1}-{chunk_end}")
+                        
+                    except Exception as replicate_err:
+                        print(f"⚠️ Replicate OCR failed, falling back to EasyOCR: {str(replicate_err)}")
+                        # Fall back to EasyOCR for this chunk
+                        use_replicate = False
+                
+                if not use_replicate:
+                    # EASYOCR CPU FALLBACK
+                    reader = get_easyocr_reader()
+                    for img_idx, img in enumerate(images):
+                        page_num = chunk_start + img_idx + 1
+                        try:
+                            # Resize for faster OCR
+                            max_width = 1000
+                            if img.width > max_width:
+                                ratio = max_width / img.width
+                                new_size = (int(img.width * ratio), int(img.height * ratio))
+                                img = img.resize(new_size, Image.Resampling.LANCZOS)
                             
-                    except Exception as e:
-                        print(f"⚠️ Error on page {page_num}: {str(e)}")
+                            img_array = np.array(img)
+                            results = reader.readtext(img_array, detail=0)
+                            
+                            page_text = ' '.join(results)
+                            if page_text.strip():
+                                all_text.append(f"[Page {page_num}]\n{page_text}")
+                                chunk_success = True
+                                
+                        except Exception as e:
+                            print(f"⚠️ EasyOCR error on page {page_num}: {str(e)}")
                 
                 # If we got here without exception and got some text, reset failure counter
                 if chunk_success:
