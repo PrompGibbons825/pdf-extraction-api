@@ -16,6 +16,7 @@ import io
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import easyocr
 from PIL import Image
+import numpy as np
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -131,8 +132,10 @@ def detect_handwriting_fast(pdf_bytes: bytes, max_pages: int = None) -> dict:
         for idx in range(max_pages_to_process):
             try:
                 img = images[idx]
+                # Convert PIL Image to numpy array for EasyOCR
+                img_array = np.array(img)
                 # EasyOCR extract text
-                results = reader.readtext(img, detail=0)  # detail=0 gives just text
+                results = reader.readtext(img_array, detail=0)  # detail=0 gives just text
                 text = '\n'.join(results)
                 
                 if text.strip():
@@ -178,7 +181,9 @@ def detect_handwriting_only(pdf_bytes: bytes) -> dict:
                 continue
             try:
                 img = images[idx]
-                results = reader.readtext(img, detail=1)  # detail=1 gives confidence
+                # Convert PIL Image to numpy array for EasyOCR
+                img_array = np.array(img)
+                results = reader.readtext(img_array, detail=1)  # detail=1 gives confidence
                 
                 # Check if any detected text has low confidence (likely handwriting)
                 # or has variable font sizes (characteristic of handwriting)
