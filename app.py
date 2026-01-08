@@ -11,6 +11,7 @@ import base64
 import json
 import requests
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from openai import OpenAI
 import pypdf
 import pdf2image
@@ -23,6 +24,8 @@ import threading
 
 # Initialize Flask app
 app = Flask(__name__)
+# Enable CORS for all routes - allows frontend to call directly
+CORS(app, origins=['https://icaruslearn.app', 'http://localhost:5173', 'http://localhost:3000'])
 app.config['MAX_CONTENT_LENGTH'] = 30 * 1024 * 1024  # 50MB max file size
 
 # Supabase configuration for direct database updates
